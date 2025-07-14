@@ -1,0 +1,7 @@
+{
+  "name": "Window Positioner Pro",
+  "description": "Enhanced window positioning with learning capabilities - position windows by WM_CLASS and capture configurations",
+  "uuid": "window-positioner@example.com",
+  "shell-version": ["46"],
+  "version": 4
+}

@@ -1,0 +1,605 @@
+#!/bin/bash
+
+# Universal Window Positioning Script
+# Usage: position <app_name> or position capture
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/.window_positions.conf"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Function to check if extension is enabled
+check_extension() {
+    if ! gnome-extensions list --enabled | grep -q window-positioner; then
+        echo -e "${RED}Error: window-positioner extension not enabled${NC}"
+        echo "Please enable the extension with: gnome-extensions enable window-positioner"
+        exit 1
+    fi
+    return 0
+}
+
+# Function to load custom configurations
+load_config() {
+    # INI-style config is parsed on-demand in get_config
+    return 0
+}
+
+# Function to save a new window configuration
+save_config() {
+    local name="$1"
+    local window_data="$2"
+    
+    local x=$(echo "$window_data" | jq -r .x)
+    local y=$(echo "$window_data" | jq -r .y)
+    local width=$(echo "$window_data" | jq -r .width)
+    local height=$(echo "$window_data" | jq -r .height)
+    local wmclass=$(echo "$window_data" | jq -r .wmClass)
+    local title=$(echo "$window_data" | jq -r .title)
+    
+    # Extract title pattern - preserve dashes and underscores
+    local title_pattern=$(echo "$title" | awk '{print $1}' | sed 's/[^a-zA-Z0-9_-]//g')
+    
+    if [ -z "$title_pattern" ] || [ ${#title_pattern} -lt 2 ]; then
+        echo -e "${YELLOW}Window title: $title${NC}"
+        read -p "Enter a title pattern to match (or press Enter to use WM_CLASS only): " user_pattern
+        if [ -n "$user_pattern" ]; then
+            title_pattern="$user_pattern"
+        else
+            title_pattern=""
+        fi
+    fi
+    
+    # Get a friendly name for the configuration
+    echo -e "${YELLOW}Window title: $title${NC}"
+    echo -e "${YELLOW}WM_CLASS: $wmclass${NC}"
+    read -p "Enter a friendly name for this configuration (default: $name): " friendly_name
+    if [ -z "$friendly_name" ]; then
+        friendly_name="$name"
+    fi
+    
+    # Remove existing configuration if it exists
+    if grep -q "^\[$name\]" "$CONFIG_FILE" 2>/dev/null; then
+        echo -e "${YELLOW}Updating existing configuration for '$name'...${NC}"
+        sed -i "/^\[$name\]/,/^\[/{ /^\[/!d; }" "$CONFIG_FILE" 2>/dev/null || true
+        sed -i "/^\[$name\]/d" "$CONFIG_FILE" 2>/dev/null || true
+    fi
+    
+    # Append new configuration in INI format
+    {
+        echo ""
+        echo "[$name]"
+        echo "name = \"$friendly_name\""
+        echo "x = $x"
+        echo "y = $y"
+        echo "width = $width"
+        echo "height = $height"
+        echo "wm_class = \"$wmclass\""
+        if [ -n "$title_pattern" ]; then
+            echo "title_pattern = \"$title_pattern\""
+        fi
+    } >> "$CONFIG_FILE"
+    
+    echo -e "${GREEN}Saved configuration for '$name' to $CONFIG_FILE${NC}"
+    if [ -n "$title_pattern" ]; then
+        echo -e "${CYAN}Will match windows with WM_CLASS '$wmclass' and title containing '$title_pattern'${NC}"
+    else
+        echo -e "${CYAN}Will match any window with WM_CLASS '$wmclass'${NC}"
+    fi
+    echo -e "${CYAN}You can now use: position $name${NC}"
+}
+
+# Function to get window configuration from INI format
+get_config() {
+    local app_name="$1"
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        return 1
+    fi
+    
+    # Check if section exists
+    if ! grep -q "^\[$app_name\]" "$CONFIG_FILE"; then
+        return 1
+    fi
+    
+    # Extract values from INI section using a simpler approach
+    local x=$(sed -n "/^\[$app_name\]/,/^\[/p" "$CONFIG_FILE" | grep "^x = " | cut -d' ' -f3)
+    local y=$(sed -n "/^\[$app_name\]/,/^\[/p" "$CONFIG_FILE" | grep "^y = " | cut -d' ' -f3)
+    local width=$(sed -n "/^\[$app_name\]/,/^\[/p" "$CONFIG_FILE" | grep "^width = " | cut -d' ' -f3)
+    local height=$(sed -n "/^\[$app_name\]/,/^\[/p" "$CONFIG_FILE" | grep "^height = " | cut -d' ' -f3)
+    local wmclass=$(sed -n "/^\[$app_name\]/,/^\[/p" "$CONFIG_FILE" | grep "^wm_class = " | cut -d' ' -f3- | tr -d '"')
+    local title_pattern=$(sed -n "/^\[$app_name\]/,/^\[/p" "$CONFIG_FILE" | grep "^title_pattern = " | cut -d' ' -f3- | tr -d '"')
+    
+    if [ -z "$x" ] || [ -z "$y" ] || [ -z "$width" ] || [ -z "$height" ] || [ -z "$wmclass" ]; then
+        return 1
+    fi
+    
+    echo "$x,$y,$width,$height,$wmclass,$title_pattern"
+}
+
+# Function to get monitor info
+get_monitor_info() {
+    local raw_result=$(gdbus call --session \
+        --dest org.gnome.Shell \
+        --object-path /org/gnome/Shell/WindowPositioner \
+        --method org.gnome.Shell.WindowPositioner.GetMonitorInfo 2>/dev/null)
+    
+    local monitor_data=$(echo "$raw_result" | sed -n "s/^('\(.*\)',)$/\1/p")
+    echo "$monitor_data"
+}
+
+# Function to capture current window
+capture_window() {
+    echo -e "${YELLOW}Preparing to capture window position...${NC}"
+    echo -e "${CYAN}Switch to the window you want to capture and wait...${NC}"
+    
+    # Countdown timer
+    for i in 3 2 1; do
+        echo -e "${YELLOW}Capturing in $i...${NC}"
+        sleep 1
+    done
+    
+    echo -e "${GREEN}Capturing now!${NC}"
+    
+    local window_data=$(gdbus call --session \
+        --dest org.gnome.Shell \
+        --object-path /org/gnome/Shell/WindowPositioner \
+        --method org.gnome.Shell.WindowPositioner.GetActiveWindowInfo 2>/dev/null)
+    
+    local clean_data=$(echo "$window_data" | sed -n "s/^('\(.*\)',)$/\1/p")
+    
+    if echo "$clean_data" | jq -e .error > /dev/null 2>&1; then
+        local error=$(echo "$clean_data" | jq -r .error)
+        echo -e "${RED}Error: $error${NC}"
+        exit 1
+    fi
+    
+    if ! echo "$clean_data" | jq . > /dev/null 2>&1; then
+        echo -e "${RED}Error: Invalid JSON received${NC}"
+        echo "Raw data: $clean_data"
+        exit 1
+    fi
+    
+    echo -e "${CYAN}Window Details:${NC}"
+    echo "$clean_data" | jq -r '"Title: " + .title'
+    echo "$clean_data" | jq -r '"Class: " + .wmClass'
+    echo "$clean_data" | jq -r '"Position: " + (.x|tostring) + "," + (.y|tostring)'
+    echo "$clean_data" | jq -r '"Size: " + (.width|tostring) + "x" + (.height|tostring)'
+    echo
+    
+    read -p "Enter a name for this window position: " name
+    
+    if [ -z "$name" ]; then
+        echo -e "${RED}No name provided. Cancelled.${NC}"
+        exit 1
+    fi
+    
+    save_config "$name" "$clean_data"
+}
+
+# Function to position a window
+position_window() {
+    local app_name="$1"
+    local config=$(get_config "$app_name")
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Error: No configuration found for '$app_name'${NC}"
+        echo -e "${YELLOW}Available configurations:${NC}"
+        list_configs
+        echo -e "${CYAN}Use 'position capture' to create a new configuration${NC}"
+        exit 1
+    fi
+    
+    IFS=',' read -r x y width height wmclass title_pattern <<< "$config"
+    
+    # Position using extension method
+    if [ -n "$title_pattern" ]; then
+        echo -e "${YELLOW}Positioning $app_name (${wmclass}, title containing '${title_pattern}') to ${x},${y} (${width}x${height})...${NC}"
+        
+        local result=$(gdbus call --session \
+            --dest org.gnome.Shell \
+            --object-path /org/gnome/Shell/WindowPositioner \
+            --method org.gnome.Shell.WindowPositioner.PositionWindowByClassAndTitle \
+            "$wmclass" "$title_pattern" $x $y $width $height 2>/dev/null)
+        
+        if [ -z "$result" ]; then
+            echo -e "${YELLOW}Title matching not available, using WM_CLASS only...${NC}"
+            result=$(gdbus call --session \
+                --dest org.gnome.Shell \
+                --object-path /org/gnome/Shell/WindowPositioner \
+                --method org.gnome.Shell.WindowPositioner.PositionWindowByClass \
+                "$wmclass" $x $y $width $height 2>/dev/null)
+        fi
+    else
+        echo -e "${YELLOW}Positioning $app_name (${wmclass}) to ${x},${y} (${width}x${height})...${NC}"
+        
+        result=$(gdbus call --session \
+            --dest org.gnome.Shell \
+            --object-path /org/gnome/Shell/WindowPositioner \
+            --method org.gnome.Shell.WindowPositioner.PositionWindowByClass \
+            "$wmclass" $x $y $width $height 2>/dev/null)
+    fi
+    
+    
+    if echo "$result" | grep -q "true"; then
+        echo -e "${GREEN}Successfully positioned $app_name${NC}"
+    else
+        echo -e "${RED}Failed to position $app_name. Is the application running?${NC}"
+        if [ -n "$title_pattern" ]; then
+            echo -e "${YELLOW}Make sure you have a window with WM_CLASS '$wmclass' and title containing '$title_pattern'${NC}"
+        else
+            echo -e "${YELLOW}Make sure you have a window with WM_CLASS '$wmclass'${NC}"
+        fi
+        exit 1
+    fi
+}
+
+# Function to edit an existing configuration
+edit_config() {
+    local name="$1"
+    
+    if ! grep -q "^\[$name\]" "$CONFIG_FILE" 2>/dev/null; then
+        echo -e "${RED}Configuration '$name' not found${NC}"
+        echo -e "${YELLOW}Available configurations:${NC}"
+        awk '
+            /^\[.*\]/ { 
+                section = substr($0, 2, length($0)-2)
+                printf "  %s\n", section
+            }
+        ' "$CONFIG_FILE" | sort
+        return 1
+    fi
+    
+    echo -e "${CYAN}Editing configuration: $name${NC}"
+    echo -e "${YELLOW}Press Enter to keep current value, or type new value${NC}"
+    echo
+    
+    # Get current values
+    local current_name=$(sed -n "/^\[$name\]/,/^\[/p" "$CONFIG_FILE" | grep "^name = " | cut -d' ' -f3- | tr -d '"')
+    local current_x=$(sed -n "/^\[$name\]/,/^\[/p" "$CONFIG_FILE" | grep "^x = " | cut -d' ' -f3)
+    local current_y=$(sed -n "/^\[$name\]/,/^\[/p" "$CONFIG_FILE" | grep "^y = " | cut -d' ' -f3)
+    local current_width=$(sed -n "/^\[$name\]/,/^\[/p" "$CONFIG_FILE" | grep "^width = " | cut -d' ' -f3)
+    local current_height=$(sed -n "/^\[$name\]/,/^\[/p" "$CONFIG_FILE" | grep "^height = " | cut -d' ' -f3)
+    local current_wmclass=$(sed -n "/^\[$name\]/,/^\[/p" "$CONFIG_FILE" | grep "^wm_class = " | cut -d' ' -f3- | tr -d '"')
+    local current_title_pattern=$(sed -n "/^\[$name\]/,/^\[/p" "$CONFIG_FILE" | grep "^title_pattern = " | cut -d' ' -f3- | tr -d '"')
+    
+    # Prompt for new values
+    read -p "Name [$current_name]: " new_name
+    read -p "X position [$current_x]: " new_x
+    read -p "Y position [$current_y]: " new_y
+    read -p "Width [$current_width]: " new_width
+    read -p "Height [$current_height]: " new_height
+    read -p "WM Class [$current_wmclass]: " new_wmclass
+    read -p "Title Pattern [$current_title_pattern]: " new_title_pattern
+    
+    # Use current values if no new value provided
+    [ -z "$new_name" ] && new_name="$current_name"
+    [ -z "$new_x" ] && new_x="$current_x"
+    [ -z "$new_y" ] && new_y="$current_y"
+    [ -z "$new_width" ] && new_width="$current_width"
+    [ -z "$new_height" ] && new_height="$current_height"
+    [ -z "$new_wmclass" ] && new_wmclass="$current_wmclass"
+    [ -z "$new_title_pattern" ] && new_title_pattern="$current_title_pattern"
+    
+    # Validate numeric inputs
+    if ! [[ "$new_x" =~ ^[0-9]+$ ]] || ! [[ "$new_y" =~ ^[0-9]+$ ]] || ! [[ "$new_width" =~ ^[0-9]+$ ]] || ! [[ "$new_height" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Error: Position and size values must be numbers${NC}"
+        return 1
+    fi
+    
+    echo
+    echo -e "${YELLOW}Updating configuration...${NC}"
+    
+    # Remove existing configuration
+    awk -v section="[$name]" '
+        BEGIN { in_section = 0 }
+        /^\[.*\]/ {
+            if ($0 == section) {
+                in_section = 1
+                next
+            } else {
+                in_section = 0
+            }
+        }
+        !in_section
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+    
+    # Add updated configuration
+    {
+        echo ""
+        echo "[$name]"
+        echo "name = \"$new_name\""
+        echo "x = $new_x"
+        echo "y = $new_y"
+        echo "width = $new_width"
+        echo "height = $new_height"
+        echo "wm_class = \"$new_wmclass\""
+        if [ -n "$new_title_pattern" ]; then
+            echo "title_pattern = \"$new_title_pattern\""
+        fi
+    } >> "$CONFIG_FILE.tmp"
+    
+    # Clean up spacing and finalize
+    awk '
+        BEGIN { prev_line = "" }
+        /^\[.*\]/ {
+            if (NR > 1 && prev_line != "") print ""
+            print
+            prev_line = $0
+            next
+        }
+        {
+            print
+            prev_line = $0
+        }
+    ' "$CONFIG_FILE.tmp" > "$CONFIG_FILE" && rm "$CONFIG_FILE.tmp"
+    
+    echo -e "${GREEN}Configuration '$name' updated successfully${NC}"
+    echo -e "${CYAN}You can now use: position $name${NC}"
+}
+
+# Function to clear a specific configuration
+clear_config() {
+    local name="$1"
+    
+    if ! grep -q "^\[$name\]" "$CONFIG_FILE" 2>/dev/null; then
+        echo -e "${RED}Configuration '$name' not found${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Removing configuration for '$name'...${NC}"
+    
+    # Remove the section and its content, then clean up spacing
+    # First remove the section
+    awk -v section="[$name]" '
+        BEGIN { in_section = 0 }
+        /^\[.*\]/ {
+            if ($0 == section) {
+                in_section = 1
+                next
+            } else {
+                in_section = 0
+            }
+        }
+        !in_section
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+    
+    # Then ensure proper spacing between sections (empty line before each [section])
+    awk '
+        BEGIN { prev_line = "" }
+        /^\[.*\]/ {
+            if (NR > 1 && prev_line != "") print ""
+            print
+            prev_line = $0
+            next
+        }
+        {
+            print
+            prev_line = $0
+        }
+    ' "$CONFIG_FILE.tmp" > "$CONFIG_FILE" && rm "$CONFIG_FILE.tmp"
+    
+    echo -e "${GREEN}Removed configuration for '$name'${NC}"
+}
+
+# Function to clear all configurations
+clear_all_configs() {
+    if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
+        echo -e "${YELLOW}No configurations to clear${NC}"
+        return 0
+    fi
+    
+    echo -e "${RED}This will remove ALL saved window configurations.${NC}"
+    read -p "Are you sure? (y/N): " confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        cat > "$CONFIG_FILE" << 'EOF'
+# Window Positioning Configuration
+
+EOF
+        echo -e "${GREEN}All configurations cleared${NC}"
+    else
+        echo -e "${CYAN}Cancelled${NC}"
+    fi
+}
+
+# Function to list available configurations
+list_configs() {
+    local show_full="${1:-}"
+    local target="${2:-}"
+    
+    # If target is specified, automatically enable full details
+    if [ -n "$target" ]; then
+        show_full="--full"
+    fi
+    
+    if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        if [ "$show_full" = "--full" ]; then
+            echo -e "${CYAN}Saved configurations (detailed):${NC}"
+            echo
+            
+            # Show full details for each configuration
+            if [ -n "$target" ]; then
+                # Show only the specified target
+                if grep -q "^\[$target\]" "$CONFIG_FILE"; then
+                    awk -v target="$target" '
+                        /^\[.*\]/ { 
+                            section = substr($0, 2, length($0)-2)
+                            if (section == target) {
+                                in_target = 1
+                                printf "  %s:\n", section
+                            } else {
+                                in_target = 0
+                            }
+                        }
+                        in_target && /^name = / {
+                            name = substr($0, 8)
+                            gsub(/^"|"$/, "", name)
+                            printf "    Name: %s\n", name
+                        }
+                        in_target && /^x = / { printf "    Position: %s", substr($0, 5) }
+                        in_target && /^y = / { printf ",%s\n", substr($0, 5) }
+                        in_target && /^width = / { printf "    Size: %s", substr($0, 9) }
+                        in_target && /^height = / { printf "x%s\n", substr($0, 10) }
+                        in_target && /^wm_class = / {
+                            wmclass = substr($0, 12)
+                            gsub(/^"|"$/, "", wmclass)
+                            printf "    WM Class: %s\n", wmclass
+                        }
+                        in_target && /^title_pattern = / {
+                            pattern = substr($0, 17)
+                            gsub(/^"|"$/, "", pattern)
+                            printf "    Title Pattern: %s\n", pattern
+                        }
+                    ' "$CONFIG_FILE"
+                else
+                    echo -e "${RED}Configuration '$target' not found${NC}"
+                    echo -e "${YELLOW}Available configurations:${NC}"
+                    awk '
+                        /^\[.*\]/ { 
+                            section = substr($0, 2, length($0)-2)
+                            printf "  %s\n", section
+                        }
+                    ' "$CONFIG_FILE" | sort
+                fi
+            else
+                # Show all configurations
+                awk '
+                    /^\[.*\]/ { 
+                        if (section != "") print ""
+                        section = substr($0, 2, length($0)-2)
+                        printf "  %s:\n", section
+                    }
+                    /^name = / {
+                        name = substr($0, 8)
+                        gsub(/^"|"$/, "", name)
+                        printf "    Name: %s\n", name
+                    }
+                    /^x = / { printf "    Position: %s", substr($0, 5) }
+                    /^y = / { printf ",%s\n", substr($0, 5) }
+                    /^width = / { printf "    Size: %s", substr($0, 9) }
+                    /^height = / { printf "x%s\n", substr($0, 10) }
+                    /^wm_class = / {
+                        wmclass = substr($0, 12)
+                        gsub(/^"|"$/, "", wmclass)
+                        printf "    WM Class: %s\n", wmclass
+                    }
+                    /^title_pattern = / {
+                        pattern = substr($0, 17)
+                        gsub(/^"|"$/, "", pattern)
+                        printf "    Title Pattern: %s\n", pattern
+                    }
+                ' "$CONFIG_FILE"
+            fi
+        else
+            echo -e "${CYAN}Saved configurations:${NC}"
+            
+            # Extract section names and their friendly names
+            awk '
+                /^\[.*\]/ { 
+                    section = substr($0, 2, length($0)-2)
+                    name = ""
+                }
+                /^name = / {
+                    name = substr($0, 8)
+                    gsub(/^"|"|$/, "", name)
+                    printf "  %-24s %s\n", section, name
+                }
+            ' "$CONFIG_FILE" | sort
+        fi
+    else
+        echo -e "${YELLOW}No configurations saved yet.${NC}"
+        echo -e "${CYAN}Use 'position capture' to create your first configuration${NC}"
+    fi
+}
+
+# Function to show usage
+show_usage() {
+    echo "Universal Window Positioning Tool"
+    echo ""
+    echo "Usage:"
+    echo "  position <app_name>     Position a configured application"
+    echo "  position capture        Capture current window position"
+    echo "  position list           List all configured applications"
+    echo "  position list --full    List configurations with full details"
+    echo "  position list <name>    Show detailed info for specific configuration"
+    echo "  position edit <name>    Edit an existing configuration"
+    echo "  position clear <name>   Remove a specific configuration"
+    echo "  position clear-all      Remove all configurations"
+    echo "  position debug          Show all windows with WM_CLASS values"
+    echo "  position --help         Show this help"
+    echo ""
+    echo "Examples:"
+    echo "  position keepass        Position KeePassXC"
+    echo "  position list           Show saved configurations"
+    echo "  position list phpstorm  Show detailed info for phpstorm config"
+    echo "  position edit phpstorm  Edit phpstorm configuration"
+    echo "  position capture        Save current window position"
+    echo ""
+}
+
+# Main execution
+main() {
+    # Check dependencies
+    if ! command -v jq &> /dev/null; then
+        echo -e "${RED}Error: jq is required but not installed${NC}"
+        echo "Install with: sudo apt install jq"
+        exit 1
+    fi
+    
+    load_config
+    check_extension
+    
+    case "${1:-help}" in
+        "capture")
+            capture_window
+            ;;
+        "list")
+            if [ "$2" = "--full" ]; then
+                list_configs --full
+            elif [ -n "$2" ]; then
+                # Second argument is a target name
+                list_configs --full "$2"
+            else
+                list_configs
+            fi
+            ;;
+        "edit")
+            if [ -n "$2" ]; then
+                edit_config "$2"
+            else
+                echo -e "${RED}Usage: position edit <config_name>${NC}"
+                echo -e "${CYAN}Example: position edit phpstorm${NC}"
+                echo -e "${CYAN}Use 'position list' to see available configurations${NC}"
+            fi
+            ;;
+        "clear")
+            if [ -n "$2" ]; then
+                clear_config "$2"
+            else
+                echo -e "${RED}Usage: position clear <config_name>${NC}"
+                echo -e "${CYAN}Example: position clear keepass${NC}"
+                echo -e "${CYAN}Use 'position clear-all' to remove everything${NC}"
+            fi
+            ;;
+        "clear-all")
+            clear_all_configs
+            ;;
+        "debug")
+            echo -e "${YELLOW}Showing window list:${NC}"
+            wmctrl -lx
+            ;;
+        "--help"|"help"|"")
+            show_usage
+            ;;
+        *)
+            position_window "$1"
+            ;;
+    esac
+}
+
+main "$@"
