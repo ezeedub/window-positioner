@@ -1,0 +1,35 @@
+name: 'Branch Naming Police'
+
+on:
+  pull_request:
+    # Run this check when a PR is opened or when new commits are pushed to it
+    types: [opened, synchronize]
+
+jobs:
+  branch-naming-rules:
+    name: Check Branch Name
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get branch name
+        # This step extracts the branch name from the PR event data
+        id: get_branch_name
+        run: echo "branch_name=${{ github.head_ref }}" >> $GITHUB_OUTPUT
+
+      - name: Validate branch name
+        # This step uses the extracted branch name and tests it against the regex
+        run: |
+          BRANCH_NAME="${{ steps.get_branch_name.outputs.branch_name }}"
+          # This is the regex for your naming convention.
+          # It allows branches like:
+          #   - issue/123-some-feature
+          #   - issue/nt-another-feature
+          # It also allows 'main' and 'develop' to be valid source branches.
+          REGEX="^((issue\/(nt|\d+)-.+)|main|develop)$"
+
+          if [[ $BRANCH_NAME =~ $REGEX ]]; then
+            echo "Branch name '$BRANCH_NAME' is valid."
+          else
+            echo "Branch name '$BRANCH_NAME' is not valid."
+            echo "Please name your branch according to the pattern: issue/nt-description or issue/123-description"
+            exit 1
+          fi
