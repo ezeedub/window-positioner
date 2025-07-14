@@ -1,0 +1,24 @@
+name: Shell Script Linter
+
+on:
+  # Run on all pull requests and direct pushes to the main branch
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  # This is the job name that will appear in GitHub's status checks
+  shellcheck:
+    name: Run Shellcheck Linter
+    # Use the latest version of Ubuntu to run the job
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Check out the repository's code so the workflow can access it
+      - uses: actions/checkout@v4
+
+      # Step 2: Run the shellcheck linter on the 'position' script
+      # If shellcheck finds any issues, it will exit with a non-zero code,
+      # which will cause this job to fail, blocking the PR merge.
+      - name: Run shellcheck
+        run: shellcheck ./position
