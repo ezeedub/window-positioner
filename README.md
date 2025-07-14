@@ -193,3 +193,7 @@ echo $PATH | grep -q "$HOME/bin" || echo "Add ~/bin to PATH"
 ## License
 
 This project is open source. See the code for implementation details.
+
+## Project Status
+
+This is a personal tool built for my specific needs. It is not actively maintained for public use. Feel free to fork it, but please note that I may not respond to issues or pull requests.
